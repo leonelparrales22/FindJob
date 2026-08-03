@@ -2,3 +2,7 @@ streamlit
 python-dotenv
 requests
 openai
+pandas
+beautifulsoup4
+openpyxl
+tenacity
