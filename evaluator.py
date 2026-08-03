@@ -62,7 +62,7 @@ Reglas de salida:
 """
 
 
-def _parsear_lote(contenido: str, total: int) -> list[dict]:
+def _parsear_lote(contenido: str, total: int, umbral: int = UMBRAL_APROBACION) -> list[dict]:
     """Parsea la respuesta JSON de un lote y retorna una lista de evaluaciones."""
     try:
         datos = json.loads(contenido)
@@ -82,7 +82,7 @@ def _parsear_lote(contenido: str, total: int) -> list[dict]:
     evaluaciones = []
     for r in resultados:
         score = int(r.get("score", 0))
-        aprobado = bool(r.get("aprobado", False)) and score >= UMBRAL_APROBACION
+        aprobado = bool(r.get("aprobado", False)) and score >= umbral
         evaluaciones.append(
             {
                 "aprobado": aprobado,
@@ -99,7 +99,7 @@ def _parsear_lote(contenido: str, total: int) -> list[dict]:
     wait=wait_exponential(multiplier=1, min=2, max=10),
     reraise=True,
 )
-def _llamar_deepseek_lote(cliente, ofertas_texto: str, total: int) -> list[dict]:
+def _llamar_deepseek_lote(cliente, ofertas_texto: str, total: int, umbral: int = UMBRAL_APROBACION) -> list[dict]:
     """Realiza una llamada a DeepSeek y retorna el lote de evaluaciones."""
     respuesta = cliente.chat.completions.create(
         model=MODEL,
@@ -113,10 +113,10 @@ def _llamar_deepseek_lote(cliente, ofertas_texto: str, total: int) -> list[dict]
         seed=42,
     )
     contenido = respuesta.choices[0].message.content
-    return _parsear_lote(contenido, total)
+    return _parsear_lote(contenido, total, umbral)
 
 
-def evaluar_lote_ofertas(ofertas: list[dict], api_key: str) -> list[dict]:
+def evaluar_lote_ofertas(ofertas: list[dict], api_key: str, umbral: int = UMBRAL_APROBACION) -> list[dict]:
     """Evalúa un lote de ofertas con DeepSeek y devuelve una lista de evaluaciones."""
     if not ofertas:
         return []
@@ -145,7 +145,7 @@ Descripción: {oferta.get('descripcion', '')[:800]}
     )
 
     try:
-        return _llamar_deepseek_lote(cliente, user_prompt, len(ofertas))
+        return _llamar_deepseek_lote(cliente, user_prompt, len(ofertas), umbral)
     except Exception as e:
         return [
             {
@@ -158,7 +158,7 @@ Descripción: {oferta.get('descripcion', '')[:800]}
         ]
 
 
-def evaluar_oferta(titulo: str, empresa: str, modalidad: str, descripcion: str, api_key: str) -> dict:
+def evaluar_oferta(titulo: str, empresa: str, modalidad: str, descripcion: str, api_key: str, umbral: int = UMBRAL_APROBACION) -> dict:
     """Evalúa una oferta con DeepSeek y devuelve un diccionario estructurado."""
     oferta = {
         "titulo": titulo,
@@ -166,7 +166,7 @@ def evaluar_oferta(titulo: str, empresa: str, modalidad: str, descripcion: str, 
         "modalidad": modalidad,
         "descripcion": descripcion,
     }
-    resultados = evaluar_lote_ofertas([oferta], api_key)
+    resultados = evaluar_lote_ofertas([oferta], api_key, umbral)
     return resultados[0] if resultados else {
         "aprobado": False,
         "score": 0,

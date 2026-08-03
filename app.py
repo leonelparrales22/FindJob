@@ -1,6 +1,5 @@
 import io
 import os
-import re
 
 import pandas as pd
 import streamlit as st
@@ -8,137 +7,23 @@ from dotenv import load_dotenv
 
 from database import filter_new_jobs, get_all_jobs, inicializar_db, save_jobs
 from evaluator import evaluar_lote_ofertas, evaluar_oferta
+from prefilter import (
+    SALARIO_MINIMO,
+    _cumple_prefiltro,
+    _motivo_descarte,
+    _quitar_acentos,
+)
 from scraper import obtener_empleos_getonboard
 
 load_dotenv()
 inicializar_db()
 
-ROLES_KEYWORDS = [
-    "ingeniero de datos",
-    "arquitecto de datos",
-    "ingeniero de inteligencia artificial",
-    "ingeniero ia",
-    "data engineer",
-    "data architect",
-    "ai engineer",
-    "machine learning engineer",
-    "ml engineer",
-    "analytics engineer",
-]
-
-ROLES_GENERICOS = [
-    "datos",
-    "data",
-]
-
-STACK_KEYWORDS = [
-    "python",
-    "sql",
-    "spark",
-    "databricks",
-    "aws",
-    "azure",
-    "llm",
-    "rag",
-    "mcp",
-    ".net",
-    "etl",
-    "el",
-    "big data",
-    "data warehouse",
-    "lakehouse",
-]
-
-DESCARTAR_KEYWORDS = [
-    "junior",
-    "trainee",
-    "intern",
-    "pasante",
-    "becario",
-    "entry level",
-    "practicante",
-    "pasantía",
-    "english required",
-    "advanced english",
-    "fluent english",
-    "english proficiency",
-    "proficiency in english",
-    "native english",
-    "english speaker",
-    "inglés requerido",
-    "inglés avanzado",
-    "inglés fluido",
-    "inglés nativo",
-    "data entry",
-    "customer data",
-    "operador de datos",
-    "captura de datos",
-]
-
-SALARIO_MINIMO = 2000
 LOTE_TAMANO = 5
 
 
-def _quitar_acentos(texto: str) -> str:
-    """Convierte a minúsculas y elimina acentos."""
-    if not texto:
-        return ""
-    texto = texto.lower()
-    vocales = str.maketrans("áéíóúüñÁÉÍÓÚÜÑ", "aeiouunaeiouun")
-    return texto.translate(vocales)
-
-
-def _es_ubicacion_valida(modalidad: str, ubicacion: str) -> bool:
-    """Acepta remoto siempre; presencial o híbrido solo si es en Quito o Ecuador."""
-    modalidad_limpia = _quitar_acentos(modalidad or "")
-    ubicacion_limpia = _quitar_acentos(ubicacion or "")
-    if "remoto" in modalidad_limpia or "remote" in modalidad_limpia:
-        return True
-    if any(u in ubicacion_limpia for u in ["quito", "ecuador"]):
-        return True
-    # Si no hay ubicación clara, dejar pasar para que DeepSeek decida
-    return not ubicacion_limpia
-
-
-def _extraer_salario_minimo(texto: str) -> float | None:
-    """Extrae el salario numérico más bajo encontrado en el texto."""
-    if not texto:
-        return None
-    patron = re.compile(
-        r"(?:[\$€]\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?))|(?:(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:USD|usd|dólares|dolares))"
-    )
-    numeros = []
-    for match in patron.finditer(texto):
-        num = match.group(1) or match.group(2)
-        num = num.replace(",", "")
-        try:
-            numeros.append(float(num))
-        except ValueError:
-            continue
-    return min(numeros) if numeros else None
-
-
-def _es_salario_valido(row) -> bool:
-    """Descarta ofertas cuyo salario explícito esté por debajo del mínimo."""
-    salario_texto = f"{row.get('salario', '')} {row.get('descripcion', '')}"
-    salario_min = _extraer_salario_minimo(salario_texto)
-    if salario_min is None:
-        return True
-    return salario_min >= SALARIO_MINIMO
-
-
-def _cumple_prefiltro(row) -> bool:
-    """Verifica rol, stack, idioma, ubicación y salario."""
-    texto = _quitar_acentos(
-        f"{row.get('titulo', '')} {row.get('descripcion', '')} {row.get('empresa', '')} {row.get('ubicacion', '')} {row.get('salario', '')}"
-    )
-    tiene_rol_especifico = any(kw in texto for kw in ROLES_KEYWORDS)
-    tiene_rol_generico = any(kw in texto for kw in ROLES_GENERICOS)
-    tiene_stack = any(kw in texto for kw in STACK_KEYWORDS)
-    descartar = any(kw in texto for kw in DESCARTAR_KEYWORDS)
-    ubicacion_ok = _es_ubicacion_valida(row.get("modalidad", ""), row.get("ubicacion", ""))
-    salario_ok = _es_salario_valido(row)
-    return (tiene_rol_especifico or tiene_rol_generico) and tiene_stack and not descartar and ubicacion_ok and salario_ok
+def _salario_minimo_actual() -> int:
+    """Devuelve el salario mínimo configurado en la UI."""
+    return st.session_state.get("salario_minimo", SALARIO_MINIMO)
 
 
 st.set_page_config(page_title="AI Job Scanner", layout="wide")
@@ -162,6 +47,19 @@ else:
         st.session_state["api_key"] = manual_key
         st.sidebar.success("Clave ingresada manualmente")
 
+st.sidebar.divider()
+st.sidebar.subheader("Configuración")
+st.session_state["salario_minimo"] = st.sidebar.slider(
+    "Salario mínimo (USD)", 0, 5000, 2000, step=100
+)
+st.session_state["umbral_aprobacion"] = st.sidebar.slider(
+    "Score mínimo para aprobación", 0, 100, 70, step=5
+)
+st.session_state["usar_getonboard"] = st.sidebar.checkbox("Usar GetOnBoard", True)
+st.session_state["modalidades_mostrar"] = st.sidebar.multiselect(
+    "Modalidades a mostrar", ["Remoto", "Híbrido", "Presencial"], default=["Remoto", "Híbrido", "Presencial"]
+)
+
 placeholder = st.empty()
 
 if st.sidebar.button("Iniciar Escaneo"):
@@ -171,7 +69,10 @@ if st.sidebar.button("Iniciar Escaneo"):
         )
     else:
         with st.spinner("Buscando ofertas en GetOnBoard..."):
-            df_nuevas = obtener_empleos_getonboard()
+            if st.session_state.get("usar_getonboard", True):
+                df_nuevas = obtener_empleos_getonboard()
+            else:
+                df_nuevas = pd.DataFrame(columns=["titulo", "empresa", "modalidad", "ubicacion", "salario", "descripcion", "url"])
             if not df_nuevas.empty:
                 df_nuevas["fuente"] = "GetOnBoard"
 
@@ -201,8 +102,15 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
         st.sidebar.error("Primero ejecuta 'Iniciar Escaneo'.")
     else:
         df = st.session_state["jobs_df"].copy()
-        df["pasa_prefiltro"] = df.apply(_cumple_prefiltro, axis=1)
+        salario_minimo = _salario_minimo_actual()
+        df["pasa_prefiltro"] = df.apply(
+            lambda row: _cumple_prefiltro(row, salario_minimo=salario_minimo), axis=1
+        )
+        df["motivo_descarte"] = df.apply(
+            lambda row: "; ".join(_motivo_descarte(row, salario_minimo=salario_minimo)), axis=1
+        )
         df_prefiltrado = df[df["pasa_prefiltro"]].copy()
+        st.session_state["debug_df"] = df
         descartadas = len(df) - len(df_prefiltrado)
         st.sidebar.info(
             f"Pre-filtrado: {descartadas} descartadas, {len(df_prefiltrado)} pasan al análisis."
@@ -222,7 +130,8 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
             total_lotes = (len(ofertas_nuevas) + LOTE_TAMANO - 1) // LOTE_TAMANO
             for i in range(0, len(ofertas_nuevas), LOTE_TAMANO):
                 lote = ofertas_nuevas[i : i + LOTE_TAMANO]
-                evaluaciones = evaluar_lote_ofertas(lote, st.session_state["api_key"])
+                umbral = st.session_state.get("umbral_aprobacion", 70)
+                evaluaciones = evaluar_lote_ofertas(lote, st.session_state["api_key"], umbral=umbral)
                 resultados.extend(evaluaciones)
                 barra.progress(int((i + len(lote)) / len(ofertas_nuevas) * 100))
             barra.empty()
@@ -234,6 +143,7 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
                 r.get("tipo_contrato_estimado", "") for r in resultados
             ]
             df_nuevas["razon"] = [r.get("razon", "") for r in resultados]
+            df_nuevas = df_nuevas.drop(columns=["pasa_prefiltro", "motivo_descarte"], errors="ignore")
 
             df_existentes = get_all_jobs()
             df_evaluado = pd.concat([df_existentes, df_nuevas], ignore_index=True).fillna("")
@@ -266,67 +176,91 @@ if metricas:
     st.sidebar.info(f"Llamadas API: {metricas.get('llamadas_api', 0)}")
 
 with placeholder.container():
-    if "evaluated_df" in st.session_state and not st.session_state["evaluated_df"].empty:
-        df = st.session_state["evaluated_df"].copy()
+    tab_resultados, tab_debug = st.tabs(["Resultados", "Depuración"])
 
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            score_min = st.slider("Score mínimo", 0, 100, 0)
-        with col2:
-            busqueda = st.text_input("Buscar palabra clave", "")
-        with col3:
-            orden = st.selectbox("Ordenar por score", ["Mayor a menor", "Menor a mayor"])
-        with col4:
-            vista = st.radio("Vista", ["Todas", "Solo aprobadas"], horizontal=True)
+    with tab_resultados:
+        if "evaluated_df" in st.session_state and not st.session_state["evaluated_df"].empty:
+            df = st.session_state["evaluated_df"].copy()
 
-        if "aprobado" in df.columns:
-            df["aprobado"] = df["aprobado"].astype(bool)
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                score_min = st.slider("Score mínimo", 0, 100, 0)
+            with col2:
+                busqueda = st.text_input("Buscar palabra clave", "")
+            with col3:
+                orden = st.selectbox("Ordenar por score", ["Mayor a menor", "Menor a mayor"])
+            with col4:
+                vista = st.radio("Vista", ["Todas", "Solo aprobadas"], horizontal=True)
 
-        if "score" in df.columns:
-            df = df[df["score"] >= score_min]
+            modalidades_mostrar = st.session_state.get("modalidades_mostrar", ["Remoto", "Híbrido", "Presencial"])
+            if modalidades_mostrar and "modalidad" in df.columns:
+                modalidades_limpias = [_quitar_acentos(m) for m in modalidades_mostrar]
+                df = df[
+                    df["modalidad"]
+                    .fillna("")
+                    .apply(lambda x: any(m in _quitar_acentos(x) for m in modalidades_limpias))
+                ]
 
-        if busqueda:
-            patron = busqueda.lower()
-            columnas_buscar = ["titulo", "empresa", "descripcion", "razon"]
-            df = df[
-                df[columnas_buscar]
-                .fillna("")
-                .apply(lambda x: x.str.lower().str.contains(patron, na=False))
-                .any(axis=1)
-            ]
+            if "aprobado" in df.columns:
+                df["aprobado"] = df["aprobado"].astype(bool)
 
-        if vista == "Solo aprobadas" and "aprobado" in df.columns:
-            df = df[df["aprobado"] == True]
+            if "score" in df.columns:
+                df = df[df["score"] >= score_min]
 
-        if "score" in df.columns:
-            df = df.sort_values(by="score", ascending=(orden == "Menor a mayor"))
+            if busqueda:
+                patron = busqueda.lower()
+                columnas_buscar = ["titulo", "empresa", "descripcion", "razon"]
+                df = df[
+                    df[columnas_buscar]
+                    .fillna("")
+                    .apply(lambda x: x.str.lower().str.contains(patron, na=False))
+                    .any(axis=1)
+                ]
 
-        st.dataframe(df, use_container_width=True)
+            if vista == "Solo aprobadas" and "aprobado" in df.columns:
+                df = df[df["aprobado"] == True]
 
-        col_csv, col_xlsx = st.columns(2)
-        with col_csv:
-            csv = df.to_csv(index=False).encode("utf-8-sig")
-            st.download_button(
-                "Exportar a CSV",
-                csv,
-                "ofertas_aprobadas.csv",
-                "text/csv",
-                use_container_width=True,
+            if "score" in df.columns:
+                df = df.sort_values(by="score", ascending=(orden == "Menor a mayor"))
+
+            st.dataframe(df, use_container_width=True)
+
+            col_csv, col_xlsx = st.columns(2)
+            with col_csv:
+                csv = df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "Exportar a CSV",
+                    csv,
+                    "ofertas_aprobadas.csv",
+                    "text/csv",
+                    use_container_width=True,
+                )
+            with col_xlsx:
+                buffer = io.BytesIO()
+                df.to_excel(buffer, index=False, engine="openpyxl")
+                st.download_button(
+                    "Exportar a Excel",
+                    buffer.getvalue(),
+                    "ofertas_aprobadas.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+
+        elif "jobs_df" in st.session_state and not st.session_state["jobs_df"].empty:
+            st.dataframe(st.session_state["jobs_df"], use_container_width=True)
+        else:
+            st.info(
+                "Aquí se mostrarán los resultados de las ofertas de trabajo en las siguientes fases."
             )
-        with col_xlsx:
-            buffer = io.BytesIO()
-            df.to_excel(buffer, index=False, engine="openpyxl")
-            st.download_button(
-                "Exportar a Excel",
-                buffer.getvalue(),
-                "ofertas_aprobadas.xlsx",
-                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
 
-    elif "jobs_df" in st.session_state and not st.session_state["jobs_df"].empty:
-        st.dataframe(st.session_state["jobs_df"], use_container_width=True)
-    else:
-        st.info(
-            "Aquí se mostrarán los resultados de las ofertas de trabajo en las siguientes fases."
-        )
+    with tab_debug:
+        if "debug_df" in st.session_state and not st.session_state["debug_df"].empty:
+            debug = st.session_state["debug_df"].copy()
+            descartadas = debug[debug["pasa_prefiltro"] == False]
+            st.markdown(f"**Ofertas descartadas:** {len(descartadas)}")
+            columnas_debug = [c for c in ["titulo", "empresa", "modalidad", "ubicacion", "salario", "motivo_descarte"] if c in descartadas.columns]
+            st.dataframe(descartadas[columnas_debug], use_container_width=True)
+        else:
+            st.info(
+                "Ejecuta 'Filtrar con IA' para ver el detalle de ofertas descartadas."
+            )
