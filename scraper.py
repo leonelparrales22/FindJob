@@ -66,7 +66,7 @@ def _extraer_campo(item: dict, alternativas: list[str]):
 
 def obtener_empleos_getonboard(query: str = "data engineer") -> pd.DataFrame:
     """Consulta ofertas de trabajo en GetOnBoard y devuelve un DataFrame."""
-    columnas = ["titulo", "empresa", "modalidad", "ubicacion", "descripcion", "url"]
+    columnas = ["titulo", "empresa", "modalidad", "ubicacion", "salario", "descripcion", "url"]
 
     try:
         respuesta = requests.get(BASE_URL, params={"query": query}, timeout=15)
@@ -110,6 +110,10 @@ def obtener_empleos_getonboard(query: str = "data engineer") -> pd.DataFrame:
             item,
             ["location", "city", "country", "place", "region", "address"],
         )
+        salario = _extraer_campo(
+            item,
+            ["salary", "salario", "compensation", "remuneration", "pay", "income"],
+        )
         descripcion = _extraer_campo(
             item,
             ["description", "job_description", "descripcion", "desc"],
@@ -125,6 +129,7 @@ def obtener_empleos_getonboard(query: str = "data engineer") -> pd.DataFrame:
                 "empresa": _normalizar_valor(empresa),
                 "modalidad": _normalizar_valor(modalidad),
                 "ubicacion": _normalizar_valor(ubicacion),
+                "salario": _normalizar_valor(salario),
                 "descripcion": _limpiar_html(descripcion) if descripcion else "",
                 "url": url_oferta or "",
             }

@@ -1,5 +1,6 @@
 import io
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -23,6 +24,9 @@ ROLES_KEYWORDS = [
     "machine learning engineer",
     "ml engineer",
     "analytics engineer",
+]
+
+ROLES_GENERICOS = [
     "datos",
     "data",
 ]
@@ -65,8 +69,13 @@ DESCARTAR_KEYWORDS = [
     "inglés avanzado",
     "inglés fluido",
     "inglés nativo",
+    "data entry",
+    "customer data",
+    "operador de datos",
+    "captura de datos",
 ]
 
+SALARIO_MINIMO = 2000
 LOTE_TAMANO = 5
 
 
@@ -91,16 +100,45 @@ def _es_ubicacion_valida(modalidad: str, ubicacion: str) -> bool:
     return not ubicacion_limpia
 
 
-def _cumple_prefiltro(row) -> bool:
-    """Verifica que la oferta tenga al menos un rol, un stack, no requiera inglés y sea ubicación válida."""
-    texto = _quitar_acentos(
-        f"{row.get('titulo', '')} {row.get('descripcion', '')} {row.get('empresa', '')} {row.get('ubicacion', '')}"
+def _extraer_salario_minimo(texto: str) -> float | None:
+    """Extrae el salario numérico más bajo encontrado en el texto."""
+    if not texto:
+        return None
+    patron = re.compile(
+        r"(?:[\$€]\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?))|(?:(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s*(?:USD|usd|dólares|dolares))"
     )
-    tiene_rol = any(kw in texto for kw in ROLES_KEYWORDS)
+    numeros = []
+    for match in patron.finditer(texto):
+        num = match.group(1) or match.group(2)
+        num = num.replace(",", "")
+        try:
+            numeros.append(float(num))
+        except ValueError:
+            continue
+    return min(numeros) if numeros else None
+
+
+def _es_salario_valido(row) -> bool:
+    """Descarta ofertas cuyo salario explícito esté por debajo del mínimo."""
+    salario_texto = f"{row.get('salario', '')} {row.get('descripcion', '')}"
+    salario_min = _extraer_salario_minimo(salario_texto)
+    if salario_min is None:
+        return True
+    return salario_min >= SALARIO_MINIMO
+
+
+def _cumple_prefiltro(row) -> bool:
+    """Verifica rol, stack, idioma, ubicación y salario."""
+    texto = _quitar_acentos(
+        f"{row.get('titulo', '')} {row.get('descripcion', '')} {row.get('empresa', '')} {row.get('ubicacion', '')} {row.get('salario', '')}"
+    )
+    tiene_rol_especifico = any(kw in texto for kw in ROLES_KEYWORDS)
+    tiene_rol_generico = any(kw in texto for kw in ROLES_GENERICOS)
     tiene_stack = any(kw in texto for kw in STACK_KEYWORDS)
     descartar = any(kw in texto for kw in DESCARTAR_KEYWORDS)
     ubicacion_ok = _es_ubicacion_valida(row.get("modalidad", ""), row.get("ubicacion", ""))
-    return tiene_rol and tiene_stack and not descartar and ubicacion_ok
+    salario_ok = _es_salario_valido(row)
+    return (tiene_rol_especifico or tiene_rol_generico) and tiene_stack and not descartar and ubicacion_ok and salario_ok
 
 
 st.set_page_config(page_title="AI Job Scanner", layout="wide")
@@ -145,6 +183,13 @@ if st.sidebar.button("Iniciar Escaneo"):
             st.session_state["jobs_df"] = df_combinado
             st.session_state.pop("evaluated_df", None)
 
+        st.session_state["metricas"] = {
+            "escaneadas": len(df_combinado),
+            "prefiltradas": len(df_combinado),
+            "evaluadas": 0,
+            "aprobadas": 0,
+            "llamadas_api": 0,
+        }
         st.sidebar.success(
             f"Se encontraron {len(df_nuevas)} ofertas nuevas y {len(df_combinado)} en total."
         )
@@ -195,10 +240,30 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
             save_jobs(df_evaluado)
             st.session_state["evaluated_df"] = df_evaluado
             aprobadas = sum(1 for r in resultados if r.get("aprobado"))
+
+            st.session_state["metricas"] = {
+                "escaneadas": len(df),
+                "prefiltradas": len(df_prefiltrado),
+                "evaluadas": len(df_nuevas),
+                "aprobadas": aprobadas,
+                "llamadas_api": total_lotes,
+            }
             st.sidebar.success(
                 f"Evaluación: {aprobadas} de {len(df_nuevas)} aprobadas. "
                 f"Llamadas API: {total_lotes} (vs {len(df_nuevas)} individuales)"
             )
+
+st.sidebar.divider()
+st.sidebar.subheader("Métricas")
+metricas = st.session_state.get("metricas", {})
+if metricas:
+    c1, c2 = st.sidebar.columns(2)
+    c1.metric("Escaneadas", metricas.get("escaneadas", 0))
+    c2.metric("Pre-filtradas", metricas.get("prefiltradas", 0))
+    c3, c4 = st.sidebar.columns(2)
+    c3.metric("Evaluadas", metricas.get("evaluadas", 0))
+    c4.metric("Aprobadas", metricas.get("aprobadas", 0))
+    st.sidebar.info(f"Llamadas API: {metricas.get('llamadas_api', 0)}")
 
 with placeholder.container():
     if "evaluated_df" in st.session_state and not st.session_state["evaluated_df"].empty:

@@ -31,6 +31,9 @@ Regla de idioma:
 Regla de ubicación:
 - El usuario vive en Quito, Ecuador. Si la modalidad es presencial o híbrida, solo aprueba si la ubicación es Quito o Ecuador. Si es remota/100% remoto, puede aprobar sin importar ubicación. Si no se especifica ubicación y la modalidad no es remota, penaliza el score.
 
+Regla de salario:
+- Si la oferta menciona un salario numérico, aprúebala solo si cumple o supera los objetivos: $2,800+ USD mensuales en dependencia o $3,500+ USD como contractor. Si el salario es inferior a $2,000 USD, penaliza fuertemente el score.
+
 Ejemplos guía:
 
 Oferta 1 - Alta alineación:
@@ -127,6 +130,8 @@ def evaluar_lote_ofertas(ofertas: list[dict], api_key: str) -> list[dict]:
 Título: {oferta.get('titulo', '')}
 Empresa: {oferta.get('empresa', '')}
 Modalidad: {oferta.get('modalidad', '')}
+Ubicación: {oferta.get('ubicacion', '')}
+Salario: {oferta.get('salario', '')}
 Descripción: {oferta.get('descripcion', '')[:800]}
 """
         )

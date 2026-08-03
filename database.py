@@ -11,6 +11,7 @@ COLUMNS = [
     "empresa",
     "modalidad",
     "ubicacion",
+    "salario",
     "descripcion",
     "aprobado",
     "score",
@@ -35,6 +36,7 @@ def inicializar_db():
                 empresa TEXT,
                 modalidad TEXT,
                 ubicacion TEXT,
+                salario TEXT,
                 descripcion TEXT,
                 aprobado INTEGER,
                 score INTEGER,
@@ -46,6 +48,10 @@ def inicializar_db():
         )
         try:
             conn.execute("ALTER TABLE jobs ADD COLUMN ubicacion TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN salario TEXT")
         except sqlite3.OperationalError:
             pass
         conn.commit()
