@@ -15,7 +15,7 @@ from prefilter import (
     _motivo_descarte,
     _quitar_acentos,
 )
-from scraper import obtener_empleos_getonboard
+from scraper import obtener_empleos_getonboard, obtener_empleos_remoteok
 
 load_dotenv()
 inicializar_db()
@@ -67,6 +67,7 @@ st.session_state["lote_tamano"] = st.sidebar.slider(
     "Ofertas por lote (DeepSeek)", 1, 15, 5, step=1
 )
 st.session_state["usar_getonboard"] = st.sidebar.checkbox("Usar GetOnBoard", True)
+st.session_state["usar_remoteok"] = st.sidebar.checkbox("Usar RemoteOK", False)
 st.session_state["modalidades_mostrar"] = st.sidebar.multiselect(
     "Modalidades a mostrar", ["Remoto", "Híbrido", "Presencial"], default=["Remoto", "Híbrido", "Presencial"]
 )
@@ -79,14 +80,24 @@ if st.sidebar.button("Iniciar Escaneo"):
             "No hay clave disponible. Cárgala desde el .env o ingrésela manualmente."
         )
     else:
-        with st.spinner("Buscando ofertas en GetOnBoard..."):
+        with st.spinner("Buscando ofertas en fuentes activas..."):
+            dfs = []
             if st.session_state.get("usar_getonboard", True):
-                df_nuevas = obtener_empleos_getonboard()
-            else:
-                df_nuevas = pd.DataFrame(columns=["titulo", "empresa", "modalidad", "ubicacion", "salario", "descripcion", "url"])
-            if not df_nuevas.empty:
-                df_nuevas["fuente"] = "GetOnBoard"
+                df_gob = obtener_empleos_getonboard()
+                if not df_gob.empty:
+                    df_gob["fuente"] = "GetOnBoard"
+                    dfs.append(df_gob)
+            if st.session_state.get("usar_remoteok", False):
+                df_rok = obtener_empleos_remoteok()
+                if not df_rok.empty:
+                    df_rok["fuente"] = "RemoteOK"
+                    dfs.append(df_rok)
+
+            if dfs:
+                df_nuevas = pd.concat(dfs, ignore_index=True)
                 df_nuevas["content_hash"] = df_nuevas.apply(_content_hash, axis=1)
+            else:
+                df_nuevas = pd.DataFrame(columns=["titulo", "empresa", "modalidad", "ubicacion", "salario", "descripcion", "url", "fuente"])
 
             df_existentes = get_all_jobs()
             if not df_nuevas.empty and not df_existentes.empty:

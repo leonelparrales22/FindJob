@@ -136,3 +136,75 @@ def obtener_empleos_getonboard(query: str = "data engineer") -> pd.DataFrame:
         )
 
     return pd.DataFrame(registros, columns=columnas)
+
+
+def obtener_empleos_remoteok(query: str = "data engineer") -> pd.DataFrame:
+    """Consulta ofertas de trabajo en RemoteOK y devuelve un DataFrame."""
+    columnas = ["titulo", "empresa", "modalidad", "ubicacion", "salario", "descripcion", "url"]
+
+    try:
+        respuesta = requests.get(
+            "https://remoteok.com/api",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=15,
+        )
+        respuesta.raise_for_status()
+        datos = respuesta.json()
+    except requests.RequestException as e:
+        print(f"Error al consultar RemoteOK: {e}")
+        return pd.DataFrame(columns=columnas)
+    except ValueError as e:
+        print(f"Error al decodificar la respuesta JSON de RemoteOK: {e}")
+        return pd.DataFrame(columns=columnas)
+
+    empleos = datos
+    if isinstance(datos, dict):
+        for clave in ["jobs", "data", "results", "items", "offers"]:
+            if clave in datos and isinstance(datos[clave], list):
+                empleos = datos[clave]
+                break
+
+    if not isinstance(empleos, list):
+        print("No se encontró una lista de empleos en la respuesta de RemoteOK.")
+        return pd.DataFrame(columns=columnas)
+
+    query_limpia = query.lower()
+    registros = []
+    for item in empleos:
+        if not isinstance(item, dict):
+            continue
+
+        titulo = _extraer_campo(item, ["position", "title", "name", "titulo"])
+        descripcion = _extraer_campo(
+            item, ["description", "job_description", "descripcion", "desc"]
+        )
+        tags = item.get("tags", [])
+        tags_texto = " ".join(str(t) for t in tags).lower() if isinstance(tags, list) else ""
+
+        if (
+            query_limpia not in (titulo or "").lower()
+            and query_limpia not in (descripcion or "").lower()
+            and query_limpia not in tags_texto
+        ):
+            continue
+
+        empresa = _extraer_campo(item, ["company", "company_name", "empresa", "organization", "name"])
+        ubicacion = _extraer_campo(item, ["location", "city", "country", "place", "region"])
+        salario = _extraer_campo(item, ["salary", "salario", "compensation", "remuneration", "pay"])
+        url_oferta = _extraer_campo(
+            item, ["url", "link", "public_url", "job_url", "apply_url", "source"]
+        )
+
+        registros.append(
+            {
+                "titulo": titulo or "",
+                "empresa": _normalizar_valor(empresa),
+                "modalidad": _normalizar_valor("Remoto"),
+                "ubicacion": _normalizar_valor(ubicacion),
+                "salario": _normalizar_valor(salario),
+                "descripcion": _limpiar_html(descripcion) if descripcion else "",
+                "url": url_oferta or "",
+            }
+        )
+
+    return pd.DataFrame(registros, columns=columnas)
