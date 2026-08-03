@@ -1,5 +1,7 @@
+import hashlib
 import io
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import streamlit as st
@@ -18,7 +20,13 @@ from scraper import obtener_empleos_getonboard
 load_dotenv()
 inicializar_db()
 
-LOTE_TAMANO = 5
+def _content_hash(row) -> str:
+    """Genera un hash del contenido relevante de la oferta."""
+    texto = (
+        f"{row.get('titulo', '')}{row.get('descripcion', '')}"
+        f"{row.get('salario', '')}{row.get('ubicacion', '')}"
+    ).lower()
+    return hashlib.md5(texto.encode()).hexdigest()[:16]
 
 
 def _salario_minimo_actual() -> int:
@@ -55,6 +63,9 @@ st.session_state["salario_minimo"] = st.sidebar.slider(
 st.session_state["umbral_aprobacion"] = st.sidebar.slider(
     "Score mínimo para aprobación", 0, 100, 70, step=5
 )
+st.session_state["lote_tamano"] = st.sidebar.slider(
+    "Ofertas por lote (DeepSeek)", 1, 15, 5, step=1
+)
 st.session_state["usar_getonboard"] = st.sidebar.checkbox("Usar GetOnBoard", True)
 st.session_state["modalidades_mostrar"] = st.sidebar.multiselect(
     "Modalidades a mostrar", ["Remoto", "Híbrido", "Presencial"], default=["Remoto", "Híbrido", "Presencial"]
@@ -75,6 +86,7 @@ if st.sidebar.button("Iniciar Escaneo"):
                 df_nuevas = pd.DataFrame(columns=["titulo", "empresa", "modalidad", "ubicacion", "salario", "descripcion", "url"])
             if not df_nuevas.empty:
                 df_nuevas["fuente"] = "GetOnBoard"
+                df_nuevas["content_hash"] = df_nuevas.apply(_content_hash, axis=1)
 
             df_existentes = get_all_jobs()
             if not df_nuevas.empty and not df_existentes.empty:
@@ -125,16 +137,44 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
             st.session_state["evaluated_df"] = get_all_jobs()
         else:
             ofertas_nuevas = df_nuevas.to_dict("records")
-            resultados = []
-            barra = st.sidebar.progress(0)
-            total_lotes = (len(ofertas_nuevas) + LOTE_TAMANO - 1) // LOTE_TAMANO
-            for i in range(0, len(ofertas_nuevas), LOTE_TAMANO):
-                lote = ofertas_nuevas[i : i + LOTE_TAMANO]
+            lote_tamano = st.session_state.get("lote_tamano", 5)
+            lotes = [
+                (i, ofertas_nuevas[i : i + lote_tamano])
+                for i in range(0, len(ofertas_nuevas), lote_tamano)
+            ]
+            total_lotes = len(lotes)
+
+            def _evaluar_lote(args):
+                idx, lote = args
                 umbral = st.session_state.get("umbral_aprobacion", 70)
-                evaluaciones = evaluar_lote_ofertas(lote, st.session_state["api_key"], umbral=umbral)
-                resultados.extend(evaluaciones)
-                barra.progress(int((i + len(lote)) / len(ofertas_nuevas) * 100))
+                return idx, evaluar_lote_ofertas(
+                    lote, st.session_state["api_key"], umbral=umbral
+                )
+
+            resultados_parciales = [None] * total_lotes
+            prompt_tokens = 0
+            completion_tokens = 0
+            barra = st.sidebar.progress(0)
+            completados = 0
+
+            max_workers = min(4, max(1, total_lotes))
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futuros = {
+                    executor.submit(_evaluar_lote, item): item[0]
+                    for item in lotes
+                }
+                for futuro in as_completed(futuros):
+                    i, respuesta = futuro.result()
+                    idx_lote = i // lote_tamano
+                    resultados_parciales[idx_lote] = respuesta.get("resultados", [])
+                    uso = respuesta.get("usage", {})
+                    prompt_tokens += uso.get("prompt_tokens", 0)
+                    completion_tokens += uso.get("completion_tokens", 0)
+                    completados += 1
+                    barra.progress(int(completados / total_lotes * 100))
             barra.empty()
+
+            resultados = [r for sub in resultados_parciales for r in sub]
 
             df_nuevas = df_nuevas.copy()
             df_nuevas["aprobado"] = [r.get("aprobado", False) for r in resultados]
@@ -143,7 +183,9 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
                 r.get("tipo_contrato_estimado", "") for r in resultados
             ]
             df_nuevas["razon"] = [r.get("razon", "") for r in resultados]
-            df_nuevas = df_nuevas.drop(columns=["pasa_prefiltro", "motivo_descarte"], errors="ignore")
+            df_nuevas = df_nuevas.drop(
+                columns=["pasa_prefiltro", "motivo_descarte"], errors="ignore"
+            )
 
             df_existentes = get_all_jobs()
             df_evaluado = pd.concat([df_existentes, df_nuevas], ignore_index=True).fillna("")
@@ -151,12 +193,19 @@ if st.sidebar.button("Filtrar con IA (DeepSeek)"):
             st.session_state["evaluated_df"] = df_evaluado
             aprobadas = sum(1 for r in resultados if r.get("aprobado"))
 
+            tokens_total = prompt_tokens + completion_tokens
+            costo_usd = (prompt_tokens * 0.14 + completion_tokens * 0.28) / 1_000_000
+
             st.session_state["metricas"] = {
                 "escaneadas": len(df),
                 "prefiltradas": len(df_prefiltrado),
                 "evaluadas": len(df_nuevas),
                 "aprobadas": aprobadas,
                 "llamadas_api": total_lotes,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "tokens_total": tokens_total,
+                "costo_usd": costo_usd,
             }
             st.sidebar.success(
                 f"Evaluación: {aprobadas} de {len(df_nuevas)} aprobadas. "
@@ -174,6 +223,12 @@ if metricas:
     c3.metric("Evaluadas", metricas.get("evaluadas", 0))
     c4.metric("Aprobadas", metricas.get("aprobadas", 0))
     st.sidebar.info(f"Llamadas API: {metricas.get('llamadas_api', 0)}")
+    tokens = metricas.get("tokens_total", 0)
+    if tokens:
+        st.sidebar.info(
+            f"Tokens: {tokens} "
+            f"(${metricas.get('costo_usd', 0):.4f} USD aprox.)"
+        )
 
 with placeholder.container():
     tab_resultados, tab_debug = st.tabs(["Resultados", "Depuración"])
@@ -223,28 +278,56 @@ with placeholder.container():
             if "score" in df.columns:
                 df = df.sort_values(by="score", ascending=(orden == "Menor a mayor"))
 
-            st.dataframe(df, use_container_width=True)
+            formato = st.radio(
+                "Formato", ["Tabla", "Tarjetas"], horizontal=True, key="vista_formato"
+            )
 
-            col_csv, col_xlsx = st.columns(2)
-            with col_csv:
-                csv = df.to_csv(index=False).encode("utf-8-sig")
-                st.download_button(
-                    "Exportar a CSV",
-                    csv,
-                    "ofertas_aprobadas.csv",
-                    "text/csv",
-                    use_container_width=True,
-                )
-            with col_xlsx:
-                buffer = io.BytesIO()
-                df.to_excel(buffer, index=False, engine="openpyxl")
-                st.download_button(
-                    "Exportar a Excel",
-                    buffer.getvalue(),
-                    "ofertas_aprobadas.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+            if formato == "Tabla":
+                st.dataframe(df, use_container_width=True)
+
+                col_csv, col_xlsx = st.columns(2)
+                with col_csv:
+                    csv = df.to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        "Exportar a CSV",
+                        csv,
+                        "ofertas_aprobadas.csv",
+                        "text/csv",
+                        use_container_width=True,
+                    )
+                with col_xlsx:
+                    buffer = io.BytesIO()
+                    df.to_excel(buffer, index=False, engine="openpyxl")
+                    st.download_button(
+                        "Exportar a Excel",
+                        buffer.getvalue(),
+                        "ofertas_aprobadas.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+            else:
+                st.subheader(f"Mostrando {len(df)} ofertas")
+                for _, row in df.iterrows():
+                    with st.container():
+                        col_a, col_b = st.columns([3, 1])
+                        with col_a:
+                            st.markdown(f"### {row.get('titulo', '')}")
+                            st.markdown(
+                                f"**{row.get('empresa', '')}** · "
+                                f"{row.get('modalidad', '')} · {row.get('ubicacion', '')}"
+                            )
+                            if row.get("salario"):
+                                st.markdown(f"💰 {row.get('salario')}")
+                            st.markdown(
+                                f"Score: **{row.get('score', 0)}** | "
+                                f"Contrato: {row.get('tipo_contrato_estimado', '')}"
+                            )
+                            st.markdown(f"📝 {row.get('razon', '')}")
+                        with col_b:
+                            url = row.get("url", "")
+                            if url:
+                                st.markdown(f"🔗 [Abrir oferta]({url})")
+                        st.divider()
 
         elif "jobs_df" in st.session_state and not st.session_state["jobs_df"].empty:
             st.dataframe(st.session_state["jobs_df"], use_container_width=True)

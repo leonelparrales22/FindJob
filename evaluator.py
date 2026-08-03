@@ -113,7 +113,13 @@ def _llamar_deepseek_lote(cliente, ofertas_texto: str, total: int, umbral: int =
         seed=42,
     )
     contenido = respuesta.choices[0].message.content
-    return _parsear_lote(contenido, total, umbral)
+    evaluaciones = _parsear_lote(contenido, total, umbral)
+    usage = respuesta.usage
+    uso = {
+        "prompt_tokens": getattr(usage, "prompt_tokens", 0) if usage else 0,
+        "completion_tokens": getattr(usage, "completion_tokens", 0) if usage else 0,
+    }
+    return evaluaciones, uso
 
 
 def evaluar_lote_ofertas(ofertas: list[dict], api_key: str, umbral: int = UMBRAL_APROBACION) -> list[dict]:
@@ -145,17 +151,21 @@ Descripción: {oferta.get('descripcion', '')[:800]}
     )
 
     try:
-        return _llamar_deepseek_lote(cliente, user_prompt, len(ofertas), umbral)
+        evaluaciones, uso = _llamar_deepseek_lote(cliente, user_prompt, len(ofertas), umbral)
+        return {"resultados": evaluaciones, "usage": uso}
     except Exception as e:
-        return [
-            {
-                "aprobado": False,
-                "score": 0,
-                "tipo_contrato_estimado": "",
-                "razon": f"Error en la evaluación del lote: {e}",
-            }
-            for _ in ofertas
-        ]
+        return {
+            "resultados": [
+                {
+                    "aprobado": False,
+                    "score": 0,
+                    "tipo_contrato_estimado": "",
+                    "razon": f"Error en la evaluación del lote: {e}",
+                }
+                for _ in ofertas
+            ],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0},
+        }
 
 
 def evaluar_oferta(titulo: str, empresa: str, modalidad: str, descripcion: str, api_key: str, umbral: int = UMBRAL_APROBACION) -> dict:
@@ -166,8 +176,8 @@ def evaluar_oferta(titulo: str, empresa: str, modalidad: str, descripcion: str, 
         "modalidad": modalidad,
         "descripcion": descripcion,
     }
-    resultados = evaluar_lote_ofertas([oferta], api_key, umbral)
-    return resultados[0] if resultados else {
+    respuesta = evaluar_lote_ofertas([oferta], api_key, umbral)
+    return respuesta["resultados"][0] if respuesta and respuesta.get("resultados") else {
         "aprobado": False,
         "score": 0,
         "tipo_contrato_estimado": "",

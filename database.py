@@ -17,6 +17,7 @@ COLUMNS = [
     "score",
     "tipo_contrato_estimado",
     "razon",
+    "content_hash",
     "fecha_guardado",
 ]
 
@@ -42,6 +43,7 @@ def inicializar_db():
                 score INTEGER,
                 tipo_contrato_estimado TEXT,
                 razon TEXT,
+                content_hash TEXT,
                 fecha_guardado TEXT
             )
             """
@@ -52,6 +54,10 @@ def inicializar_db():
             pass
         try:
             conn.execute("ALTER TABLE jobs ADD COLUMN salario TEXT")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE jobs ADD COLUMN content_hash TEXT")
         except sqlite3.OperationalError:
             pass
         conn.commit()
@@ -114,8 +120,15 @@ def get_evaluated_urls() -> set[str]:
 
 
 def filter_new_jobs(df: pd.DataFrame) -> pd.DataFrame:
-    """Filtra el DataFrame para devolver solo ofertas no evaluadas."""
+    """Filtra el DataFrame para devolver solo ofertas no evaluadas (por URL o contenido)."""
     if df.empty:
         return df
     urls_existentes = get_evaluated_urls()
-    return df[~df["url"].isin(urls_existentes)].copy()
+    hashes_existentes = set()
+    with _conexion() as conn:
+        cursor = conn.execute("SELECT content_hash FROM jobs WHERE content_hash IS NOT NULL")
+        hashes_existentes = {row[0] for row in cursor.fetchall()}
+    mascara_url = ~df["url"].isin(urls_existentes)
+    if "content_hash" in df.columns:
+        mascara_url = mascara_url & ~df["content_hash"].isin(hashes_existentes)
+    return df[mascara_url].copy()
